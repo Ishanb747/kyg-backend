@@ -44,10 +44,12 @@ class Config:
     RATELIMIT_DEFAULT = os.getenv('RATELIMIT_DEFAULT', '10 per hour')
     RATELIMIT_STORAGE_URL = os.getenv('REDIS_URL', 'memory://')
     
-        # CORS
-    cors_origins = "*" if Config.CORS_ORIGINS == ["*"] else Config.CORS_ORIGINS
-
-    
+    # CORS - properly handle the * case
+    _cors_env = os.getenv('CORS_ORIGINS', '*')
+    if _cors_env == '*':
+        CORS_ORIGINS = '*'
+    else:
+        CORS_ORIGINS = _cors_env.split(',')
     
     # Logging
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -65,16 +67,17 @@ class Config:
 app = Flask(__name__)
 app.config.from_object(Config)
 
-# CORS setup
+# CORS setup with proper configuration
 CORS(app, 
      resources={r"/*": {
-         "origins": cors_origins,
+         "origins": Config.CORS_ORIGINS,
          "methods": ["GET", "POST", "OPTIONS"],
          "allow_headers": ["Content-Type", "Authorization"],
          "expose_headers": ["Content-Type"],
          "supports_credentials": False,
          "max_age": 3600
      }})
+
 # Rate limiting
 limiter = Limiter(
     app=app,
@@ -186,7 +189,20 @@ def log_request():
 
 @app.after_request
 def after_request(response):
-    """Add security headers"""
+    """Add security headers and ensure CORS headers are present"""
+    # CORS headers (backup in case flask-cors doesn't add them)
+    origin = request.headers.get('Origin')
+    if origin:
+        if Config.CORS_ORIGINS == '*':
+            response.headers['Access-Control-Allow-Origin'] = '*'
+        elif isinstance(Config.CORS_ORIGINS, list) and (origin in Config.CORS_ORIGINS or '*' in Config.CORS_ORIGINS):
+            response.headers['Access-Control-Allow-Origin'] = origin
+    
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Max-Age'] = '3600'
+    
+    # Security headers
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-XSS-Protection'] = '1; mode=block'
@@ -766,9 +782,12 @@ def root():
     })
 
 
-@app.route('/health', methods=['GET'])
+@app.route('/health', methods=['GET', 'OPTIONS'])
 def health_check():
     """Detailed health check endpoint"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    
     groq_configured = bool(Config.GROQ_API_KEY)
     
     return jsonify({
@@ -778,11 +797,12 @@ def health_check():
         'version': '2.0',
         'environment': Config.ENV,
         'groq_api_configured': groq_configured,
-        'rate_limiting_enabled': Config.RATELIMIT_ENABLED
+        'rate_limiting_enabled': Config.RATELIMIT_ENABLED,
+        'cors_origins': Config.CORS_ORIGINS
     })
 
 
-@app.route('/analyze', methods=['POST'])
+@app.route('/analyze', methods=['POST', 'OPTIONS'])
 @limiter.limit("5 per hour")
 @require_api_key
 @validate_chat_data
@@ -800,6 +820,9 @@ def analyze_chat():
         "api_key": "..."  // Optional if GROQ_API_KEY env var set
     }
     """
+    if request.method == 'OPTIONS':
+        return '', 204
+    
     try:
         data = request.get_json()
         chat_data = data['chat_data']
@@ -830,7 +853,7 @@ def analyze_chat():
         }), 500
 
 
-@app.route('/analyze/quick', methods=['POST'])
+@app.route('/analyze/quick', methods=['POST', 'OPTIONS'])
 @limiter.limit("10 per hour")
 @require_api_key
 @validate_chat_data
@@ -839,6 +862,9 @@ def quick_analyze():
     Quick analysis endpoint (fewer API calls, faster)
     Same payload as /analyze but with reduced sample sizes
     """
+    if request.method == 'OPTIONS':
+        return '', 204
+    
     try:
         data = request.get_json()
         chat_data = data['chat_data']
@@ -907,6 +933,7 @@ if __name__ == '__main__':
     print(f"  Debug Mode: {Config.DEBUG}")
     print(f"  Groq API Key: {'Configured' if Config.GROQ_API_KEY else 'Not set (require in requests)'}")
     print(f"  Rate Limiting: {'Enabled' if Config.RATELIMIT_ENABLED else 'Disabled'}")
+    print(f"  CORS Origins: {Config.CORS_ORIGINS}")
     print(f"  Max Messages: {Config.MAX_MESSAGES:,}")
     print("="*70 + "\n")
     
