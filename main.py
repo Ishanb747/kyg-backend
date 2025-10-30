@@ -45,7 +45,11 @@ class Config:
     RATELIMIT_STORAGE_URL = os.getenv('REDIS_URL', 'memory://')
     
     # CORS
-    # CORS_ORIGINS = os.getenv('CORS_ORIGINS', '*').split(',')
+    CORS_ORIGINS = (
+    os.getenv('CORS_ORIGINS', '*').split(',')
+    if Config.ENV == 'production'
+    else ['*']
+    )
     
     
     # Logging
