@@ -44,12 +44,9 @@ class Config:
     RATELIMIT_DEFAULT = os.getenv('RATELIMIT_DEFAULT', '10 per hour')
     RATELIMIT_STORAGE_URL = os.getenv('REDIS_URL', 'memory://')
     
-    # CORS
-    CORS_ORIGINS = (
-        os.getenv('CORS_ORIGINS', '*').split(',')
-        if ENV == 'production'
-        else ['*']
-    )
+        # CORS
+    cors_origins = "*" if Config.CORS_ORIGINS == ["*"] else Config.CORS_ORIGINS
+
     
     
     # Logging
@@ -69,7 +66,15 @@ app = Flask(__name__)
 app.config.from_object(Config)
 
 # CORS setup
-CORS(app, origins=Config.CORS_ORIGINS if Config.CORS_ORIGINS != ["*"] else "*")
+CORS(app, 
+     resources={r"/*": {
+         "origins": cors_origins,
+         "methods": ["GET", "POST", "OPTIONS"],
+         "allow_headers": ["Content-Type", "Authorization"],
+         "expose_headers": ["Content-Type"],
+         "supports_credentials": False,
+         "max_age": 3600
+     }})
 # Rate limiting
 limiter = Limiter(
     app=app,
