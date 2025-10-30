@@ -4,6 +4,7 @@ Production-Ready WhatsApp Chat Analyzer API
 - Proper error handling and logging
 - Rate limiting and security
 - Health checks and monitoring
+- Complete analysis functions
 - Gunicorn-ready
 """
 
@@ -384,14 +385,57 @@ Provide comprehensive analysis:
    - Conspiracy Theorist: Most random theories/wild takes
 
 3. D&D ALIGNMENT (be specific and nuanced):
-   Assign alignment based on behavior patterns.
+   Assign alignment based on:
+   - LAWFUL: Structured, rule-following, organized, planners
+   - NEUTRAL: Balanced, adaptable, situation-dependent
+   - CHAOTIC: Spontaneous, unpredictable, rule-breaking, random
+   
+   - GOOD: Supportive, kind, helps others, uplifts group
+   - NEUTRAL: Balanced morality, self-focused but not harmful
+   - EVIL: Teases/roasts others, sarcastic, playfully mean (not actually evil)
 
 4. COMMUNICATION PATTERNS:
    - Who initiates serious conversations?
    - Who keeps things light?
    - Who maintains group connection?
 
-Respond with ONLY valid JSON with all required fields."""
+Respond with ONLY valid JSON:
+{{
+  "personalities": [
+    {{
+      "name": "PersonName",
+      "style": "description",
+      "tone": "description",
+      "traits": ["trait1", "trait2", "trait3", "trait4"]
+    }}
+  ],
+  "roles": {{
+    "therapist": {{"name": "Name", "score": 85, "reason": "specific examples"}},
+    "hype_man": {{"name": "Name", "score": 90, "reason": "specific examples"}},
+    "comedian": {{"name": "Name", "score": 88, "reason": "specific examples"}},
+    "intellectual": {{"name": "Name", "score": 82, "reason": "specific examples"}},
+    "peacemaker": {{"name": "Name", "score": 75, "reason": "specific examples"}},
+    "drama_queen": {{"name": "Name", "score": 80, "reason": "specific examples"}},
+    "meme_lord": {{"name": "Name", "score": 85, "reason": "specific examples"}},
+    "ghost": {{"name": "Name", "score": 70, "reason": "specific examples"}},
+    "chaos_agent": {{"name": "Name", "score": 88, "reason": "specific examples"}},
+    "voice_of_reason": {{"name": "Name", "score": 83, "reason": "specific examples"}},
+    "oversharer": {{"name": "Name", "score": 77, "reason": "specific examples"}},
+    "conspiracy_theorist": {{"name": "Name", "score": 72, "reason": "specific examples"}}
+  }},
+  "alignments": [
+    {{
+      "name": "Person1",
+      "alignment": "Chaotic Good",
+      "reason": "specific behavioral evidence"
+    }}
+  ],
+  "communication_patterns": {{
+    "serious_initiator": "Name",
+    "lightness_keeper": "Name",
+    "connection_maintainer": "Name"
+  }}
+}}"""
         
         system_msg = "You are a multilingual chat analysis expert. Understand Hinglish and code-switching. Respond with valid JSON only."
         
@@ -409,17 +453,44 @@ PARTICIPANTS: {', '.join(self.participants)}
 MESSAGES:
 {context}
 
-Find the BEST examples for 10 categories: Most Wholesome, Most Savage, Most Random, Most Inspirational, Most Cringe, Most Relatable, Most Unhinged, Plot Twist, Mic Drop, Big Brain.
+Find the BEST examples for each category. Each must be:
+- Actually impactful/meaningful/funny (not generic)
+- Have clear context
+- Representative of the category
+- Include actual message snippet (30-100 chars)
 
-Each must be actually impactful with clear context. ONLY include categories with STRONG examples.
+GOLDEN MOMENT CATEGORIES:
+1. Most Wholesome: Genuinely heartwarming message
+2. Most Savage: Wittiest roast/comeback
+3. Most Random: Hilariously out-of-context
+4. Most Inspirational: Motivational/uplifting
+5. Most Cringe: Awkward but funny
+6. Most Relatable: Universal "same bro" moment
+7. Most Unhinged: Absolutely wild/crazy statement
+8. Plot Twist: Unexpected conversation turn
+9. Mic Drop: Perfect conversation ender
+10. Big Brain: Brilliant insight/solution
 
-Respond with ONLY valid JSON."""
+ONLY include categories where you found CLEAR, STRONG examples. Skip if no good match.
+
+Respond with ONLY valid JSON:
+{{
+  "golden_moments": [
+    {{
+      "category": "Most Savage",
+      "sender": "Name",
+      "message": "message snippet (30-100 chars)",
+      "context": "why this is perfect for category",
+      "impact_score": 95
+    }}
+  ]
+}}"""
         
-        system_msg = "You are a content curator. Find genuinely memorable moments. Skip categories without strong examples. Respond with JSON only."
+        system_msg = "You are a content curator. Find genuinely memorable moments, not generic ones. Skip categories without strong examples. Respond with JSON only."
         
         result = self._call_groq_api(prompt, system_msg, max_tokens=3500, temp=0.5)
         
-        # Filter low-quality moments
+        # Filter out low-quality moments
         if 'golden_moments' in result:
             result['golden_moments'] = [
                 m for m in result['golden_moments']
@@ -427,6 +498,180 @@ Respond with ONLY valid JSON."""
             ]
         
         return result
+    
+    def ai_content_analysis(self, sample_size: int = 700) -> Dict:
+        """Topics, humor, and language patterns"""
+        sampled = self.sample_messages(sample_size, 'smart')
+        context = self.format_messages_for_llm(sampled, max_msgs=150)
+        
+        prompt = f"""Analyze content themes in this multilingual chat.
+
+PARTICIPANTS: {', '.join(self.participants)}
+
+MESSAGES:
+{context}
+
+Analyze:
+
+1. TOP TOPICS (top 10):
+   - Topic name
+   - Frequency (high/medium/low)
+   - Key participants
+   - Sample keywords (including Hinglish)
+
+2. HUMOR ANALYSIS:
+   - Top 5 funniest messages with context
+   - Top 5 sarcastic moments
+   - Inside jokes (recurring phrases)
+
+3. LANGUAGE PATTERNS:
+   - Unique slang/Hinglish terms
+   - Code-switching patterns
+
+Respond with ONLY valid JSON:
+{{
+  "topics": [
+    {{
+      "topic": "Topic Name",
+      "frequency": "high",
+      "participants": ["Name1"],
+      "keywords": ["word1", "word2"]
+    }}
+  ],
+  "humor": {{
+    "funniest": [
+      {{"sender": "Name", "message": "snippet", "why": "explanation"}}
+    ],
+    "sarcasm": [
+      {{"sender": "Name", "message": "snippet", "context": "why sarcastic"}}
+    ],
+    "inside_jokes": [
+      {{"phrase": "recurring phrase", "usage": "how used", "frequency": "medium"}}
+    ]
+  }},
+  "language_patterns": {{
+    "unique_slang": ["term1", "term2"],
+    "code_switching": "description"
+  }}
+}}"""
+        
+        system_msg = "You are a multilingual content analyst. Respond with JSON only."
+        
+        return self._call_groq_api(prompt, system_msg, max_tokens=3500, temp=0.5)
+    
+    def ai_relationship_dynamics(self, sample_size: int = 600) -> Dict:
+        """Relationship analysis"""
+        sampled = self.sample_messages(sample_size, 'smart')
+        context = self.format_messages_for_llm(sampled, max_msgs=120)
+        
+        prompt = f"""Analyze relationships in this chat.
+
+PARTICIPANTS: {', '.join(self.participants)}
+
+MESSAGES:
+{context}
+
+Analyze:
+
+1. CLOSEST PAIRS: Top 3-5 pairs with:
+   - Bond type
+   - Dynamic description
+   - Evidence
+
+2. GROUP DYNAMICS:
+   - Energy Matcher: Best at matching others' vibe
+   - Conflict Resolver: Calms arguments
+   - Topic Starter: Initiates discussions
+   - Silent Observer: Selective but meaningful participation
+
+3. INTERACTION PATTERNS:
+   - Response patterns
+   - Leadership style
+
+Respond with ONLY valid JSON:
+{{
+  "closest_pairs": [
+    {{
+      "pair": ["Person1", "Person2"],
+      "bond_type": "type",
+      "dynamic": "description",
+      "evidence": "examples"
+    }}
+  ],
+  "group_roles": {{
+    "energy_matcher": {{"name": "Name", "score": 85, "reason": "why"}},
+    "conflict_resolver": {{"name": "Name", "score": 80, "reason": "why"}},
+    "topic_starter": {{"name": "Name", "score": 90, "reason": "why"}},
+    "silent_observer": {{"name": "Name", "score": 75, "reason": "why"}}
+  }},
+  "dynamics": {{
+    "leadership": "description",
+    "subgroups": "description or null"
+  }}
+}}"""
+        
+        system_msg = "You are a social dynamics expert. Respond with JSON only."
+        
+        return self._call_groq_api(prompt, system_msg, max_tokens=3000, temp=0.4)
+    
+    def ai_sentiment_timeline(self, sample_size: int = 500) -> Dict:
+        """Sentiment analysis over time"""
+        sampled = self.sample_messages(sample_size, 'distributed')
+        
+        period_size = len(sampled) // 8
+        periods = [sampled[i:i+period_size] for i in range(0, len(sampled), period_size)]
+        
+        period_summaries = []
+        for idx, period in enumerate(periods[:8]):
+            if not period:
+                continue
+            
+            date_range = f"{period[0]['date']} to {period[-1]['date']}"
+            context = self.format_messages_for_llm(period, max_msgs=30)
+            
+            period_summaries.append({
+                'period': idx + 1,
+                'date_range': date_range,
+                'sample': context
+            })
+        
+        periods_text = "\n\n".join([
+            f"PERIOD {p['period']} ({p['date_range']}):\n{p['sample']}"
+            for p in period_summaries
+        ])
+        
+        prompt = f"""Analyze sentiment evolution.
+
+PARTICIPANTS: {', '.join(self.participants)}
+
+{periods_text}
+
+For each period:
+1. Mood (positive/neutral/negative/mixed)
+2. Energy (high/medium/low)
+3. Key themes
+4. Shifts from previous
+
+Respond with ONLY valid JSON:
+{{
+  "timeline": [
+    {{
+      "period": 1,
+      "date_range": "range",
+      "mood": "positive",
+      "energy": "high",
+      "themes": ["theme1"],
+      "shift": "change description"
+    }}
+  ],
+  "overall_trend": "improving/stable/declining/fluctuating",
+  "healthiest_period": 3,
+  "most_active_period": 5
+}}"""
+        
+        system_msg = "You are a sentiment analyst. Respond with JSON only."
+        
+        return self._call_groq_api(prompt, system_msg, max_tokens=2500, temp=0.3)
     
     def generate_comprehensive_report(self) -> Dict:
         """Generate full analysis"""
@@ -461,6 +706,26 @@ Respond with ONLY valid JSON."""
             app.logger.info("Running golden moments analysis")
             moments_data = self.ai_golden_moments_analysis(700)
             report['golden_moments'] = moments_data.get('golden_moments', [])
+            time.sleep(0.5)
+            
+            app.logger.info("Running content & humor analysis")
+            content_data = self.ai_content_analysis(700)
+            report['topics'] = content_data.get('topics', [])
+            report['humor'] = content_data.get('humor', {})
+            report['language_patterns'] = content_data.get('language_patterns', {})
+            time.sleep(0.5)
+            
+            app.logger.info("Running relationship analysis")
+            relationship_data = self.ai_relationship_dynamics(600)
+            report['closest_pairs'] = relationship_data.get('closest_pairs', [])
+            report['group_roles'] = relationship_data.get('group_roles', {})
+            report['group_dynamics'] = relationship_data.get('dynamics', {})
+            time.sleep(0.5)
+            
+            app.logger.info("Running sentiment timeline analysis")
+            sentiment_data = self.ai_sentiment_timeline(500)
+            report['sentiment_timeline'] = sentiment_data.get('timeline', [])
+            report['sentiment_trend'] = sentiment_data.get('overall_trend', 'unknown')
             
             elapsed = time.time() - start_time
             report['metadata']['analysis_time_seconds'] = round(elapsed, 2)
@@ -609,10 +874,38 @@ def quick_analyze():
 
 # ===== MAIN =====
 if __name__ == '__main__':
+    print("\n" + "="*70)
+    print("🚀 Enhanced WhatsApp Analyzer API Starting...")
+    print("="*70)
+    print("\nEndpoints:")
+    print("  GET  /              - API documentation")
+    print("  GET  /health        - Health check")
+    print("  POST /analyze       - Full comprehensive analysis")
+    print("  POST /analyze/quick - Quick analysis (2-3 API calls)")
+    print("\nPayload format:")
+    print("""
+  {
+    "chat_data": {
+      "messages": [...],
+      "participants": [...],
+      "dateRange": {...}
+    },
+    "api_key": "optional-groq-key"
+  }
+    """)
+    print("\nConfiguration:")
+    print(f"  Environment: {Config.ENV}")
+    print(f"  Debug Mode: {Config.DEBUG}")
+    print(f"  Groq API Key: {'Configured' if Config.GROQ_API_KEY else 'Not set (require in requests)'}")
+    print(f"  Rate Limiting: {'Enabled' if Config.RATELIMIT_ENABLED else 'Disabled'}")
+    print(f"  Max Messages: {Config.MAX_MESSAGES:,}")
+    print("="*70 + "\n")
+    
     if Config.DEBUG:
-        app.logger.warning("Running in DEBUG mode - not suitable for production!")
+        app.logger.warning("⚠️  Running in DEBUG mode - not suitable for production!")
         app.run(host='0.0.0.0', port=5050, debug=True)
     else:
         app.logger.info("Starting in production mode")
-        app.logger.info("Use gunicorn for production: gunicorn -w 4 -b 0.0.0.0:5050 app:app")
+        app.logger.info("💡 Use gunicorn for production:")
+        app.logger.info("   gunicorn -w 4 -b 0.0.0.0:5050 --timeout 300 app:app")
         app.run(host='0.0.0.0', port=5050)
