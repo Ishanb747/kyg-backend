@@ -46,9 +46,9 @@ class Config:
     
     # CORS
     CORS_ORIGINS = (
-    os.getenv('CORS_ORIGINS', '*').split(',')
-    if Config.ENV == 'production'
-    else ['*']
+        os.getenv('CORS_ORIGINS', '*').split(',')
+        if ENV == 'production'
+        else ['*']
     )
     
     
