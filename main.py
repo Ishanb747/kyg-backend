@@ -46,7 +46,7 @@ class Config:
     
     # CORS
     # CORS_ORIGINS = os.getenv('CORS_ORIGINS', '*').split(',')
-    CORS(app, origins=Config.CORS_ORIGINS if Config.CORS_ORIGINS != ["*"] else "*")
+    
     
     # Logging
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
@@ -65,8 +65,7 @@ app = Flask(__name__)
 app.config.from_object(Config)
 
 # CORS setup
-CORS(app, origins=Config.CORS_ORIGINS)
-
+CORS(app, origins=Config.CORS_ORIGINS if Config.CORS_ORIGINS != ["*"] else "*")
 # Rate limiting
 limiter = Limiter(
     app=app,
