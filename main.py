@@ -1,244 +1,33 @@
 """
-Production-Ready WhatsApp Chat Analyzer API
-- Environment-based configuration
-- Proper error handling and logging
-- Rate limiting and security
-- Health checks and monitoring
-- Complete analysis functions
-- Gunicorn-ready
+Enhanced WhatsApp Chat Analyzer - Flask API
+Improvements:
+- Nuanced D&D alignments based on behavior patterns
+- 8-10 golden moment categories with filtering
+- Expanded spicy roles (Drama Queen, Meme Lord, Ghost, etc.)
+- Flask API with JSON upload and optional API key
+- Environment variable configuration for deployment
 """
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 import json
 import re
-import os
-import logging
-from logging.handlers import RotatingFileHandler
-from collections import defaultdict
+from collections import defaultdict, Counter
 from datetime import datetime
 import statistics
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import time
 import random
 from groq import Groq
-from functools import wraps
+import os
 
-# ===== CONFIGURATION =====
-class Config:
-    """Application configuration"""
-    # Environment
-    ENV = os.getenv('FLASK_ENV', 'production')
-    DEBUG = ENV == 'development'
-    
-    # Security
-    SECRET_KEY = os.getenv('SECRET_KEY', os.urandom(24).hex())
-    
-    # API Keys
-    GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-    
-    # Rate limiting
-    RATELIMIT_ENABLED = os.getenv('RATELIMIT_ENABLED', 'true').lower() == 'true'
-    RATELIMIT_DEFAULT = os.getenv('RATELIMIT_DEFAULT', '10 per hour')
-    RATELIMIT_STORAGE_URL = os.getenv('REDIS_URL', 'memory://')
-    
-    # CORS - properly handle the * case
-    _cors_env = os.getenv('CORS_ORIGINS', '*')
-    if _cors_env == '*':
-        CORS_ORIGINS = '*'
-    else:
-        CORS_ORIGINS = _cors_env.split(',')
-    
-    # Logging
-    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-    LOG_FILE = os.getenv('LOG_FILE', 'app.log')
-    
-    # Request limits
-    MAX_CONTENT_LENGTH = int(os.getenv('MAX_CONTENT_LENGTH', 50 * 1024 * 1024))  # 50MB
-    MAX_MESSAGES = int(os.getenv('MAX_MESSAGES', 100000))
-    
-    # Analysis limits
-    ANALYSIS_TIMEOUT = int(os.getenv('ANALYSIS_TIMEOUT', 300))  # 5 minutes
-
-
-# ===== APP INITIALIZATION =====
 app = Flask(__name__)
-app.config.from_object(Config)
+CORS(app)
 
-# CORS setup with proper configuration
-CORS(app, 
-     resources={r"/*": {
-         "origins": Config.CORS_ORIGINS,
-         "methods": ["GET", "POST", "OPTIONS"],
-         "allow_headers": ["Content-Type", "Authorization"],
-         "expose_headers": ["Content-Type"],
-         "supports_credentials": False,
-         "max_age": 3600
-     }})
-
-# Rate limiting
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    storage_uri=Config.RATELIMIT_STORAGE_URL,
-    default_limits=[Config.RATELIMIT_DEFAULT] if Config.RATELIMIT_ENABLED else []
-)
-
-# ===== LOGGING SETUP =====
-def setup_logging():
-    """Configure application logging"""
-    log_level = getattr(logging, Config.LOG_LEVEL.upper(), logging.INFO)
-    
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(log_level)
-    console_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    console_handler.setFormatter(console_formatter)
-    
-    # File handler with rotation
-    if not Config.DEBUG:
-        file_handler = RotatingFileHandler(
-            Config.LOG_FILE,
-            maxBytes=10485760,  # 10MB
-            backupCount=5
-        )
-        file_handler.setLevel(log_level)
-        file_formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
-        )
-        file_handler.setFormatter(file_formatter)
-        app.logger.addHandler(file_handler)
-    
-    app.logger.addHandler(console_handler)
-    app.logger.setLevel(log_level)
-    
-    # Suppress werkzeug logs in production
-    if not Config.DEBUG:
-        logging.getLogger('werkzeug').setLevel(logging.WARNING)
-
-setup_logging()
+# Get API key from environment variable
+DEFAULT_GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
 
 
-# ===== MIDDLEWARE & DECORATORS =====
-def require_api_key(f):
-    """Decorator to validate API key in request"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not Config.GROQ_API_KEY:
-            data = request.get_json(silent=True) or {}
-            if 'api_key' not in data:
-                app.logger.warning("API request without key and no default configured")
-                return jsonify({
-                    'error': 'API key required',
-                    'message': 'Please provide api_key in request body or set GROQ_API_KEY environment variable'
-                }), 401
-        return f(*args, **kwargs)
-    return decorated_function
-
-
-def validate_chat_data(f):
-    """Decorator to validate chat data structure"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not request.is_json:
-            return jsonify({
-                'error': 'Invalid content type',
-                'message': 'Content-Type must be application/json'
-            }), 400
-        
-        data = request.get_json()
-        
-        if 'chat_data' not in data:
-            return jsonify({
-                'error': 'Missing chat_data',
-                'message': 'Request must include chat_data field'
-            }), 400
-        
-        chat_data = data['chat_data']
-        
-        # Validate required fields
-        required_fields = ['messages', 'participants']
-        for field in required_fields:
-            if field not in chat_data:
-                return jsonify({
-                    'error': f'Missing required field: {field}',
-                    'message': f'chat_data must include {field}'
-                }), 400
-        
-        # Validate message count
-        if len(chat_data['messages']) > Config.MAX_MESSAGES:
-            return jsonify({
-                'error': 'Too many messages',
-                'message': f'Maximum {Config.MAX_MESSAGES} messages allowed'
-            }), 413
-        
-        return f(*args, **kwargs)
-    return decorated_function
-
-
-@app.before_request
-def log_request():
-    """Log incoming requests"""
-    if not request.path.startswith('/health'):
-        app.logger.info(f"{request.method} {request.path} from {request.remote_addr}")
-
-
-@app.after_request
-def after_request(response):
-    """Add security headers and ensure CORS headers are present"""
-    # CORS headers (backup in case flask-cors doesn't add them)
-    origin = request.headers.get('Origin')
-    if origin:
-        if Config.CORS_ORIGINS == '*':
-            response.headers['Access-Control-Allow-Origin'] = '*'
-        elif isinstance(Config.CORS_ORIGINS, list) and (origin in Config.CORS_ORIGINS or '*' in Config.CORS_ORIGINS):
-            response.headers['Access-Control-Allow-Origin'] = origin
-    
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    response.headers['Access-Control-Max-Age'] = '3600'
-    
-    # Security headers
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    return response
-
-
-@app.errorhandler(413)
-def request_entity_too_large(error):
-    """Handle payload too large errors"""
-    return jsonify({
-        'error': 'Payload too large',
-        'message': f'Maximum request size is {Config.MAX_CONTENT_LENGTH / 1024 / 1024}MB'
-    }), 413
-
-
-@app.errorhandler(429)
-def ratelimit_handler(e):
-    """Handle rate limit errors"""
-    app.logger.warning(f"Rate limit exceeded: {request.remote_addr}")
-    return jsonify({
-        'error': 'Rate limit exceeded',
-        'message': str(e.description)
-    }), 429
-
-
-@app.errorhandler(500)
-def internal_error(error):
-    """Handle internal server errors"""
-    app.logger.error(f"Internal error: {str(error)}")
-    return jsonify({
-        'error': 'Internal server error',
-        'message': 'An unexpected error occurred'
-    }), 500
-
-
-# ===== ANALYZER CLASS =====
 class EnhancedWhatsAppAnalyzer:
     def __init__(self, chat_data: dict, groq_api_key: str):
         """Initialize analyzer with chat data and Groq API"""
@@ -253,7 +42,7 @@ class EnhancedWhatsAppAnalyzer:
         
         self.messages = [m for m in self.messages if m['sender'] in self.participants]
         
-        app.logger.info(f"Loaded {len(self.messages):,} messages from {len(self.participants)} participants")
+        print(f"✓ Loaded {len(self.messages):,} messages from {len(self.participants)} participants")
     
     def sample_messages(self, n: int = 500, strategy: str = 'smart') -> List[Dict]:
         """Intelligent sampling for maximum diversity"""
@@ -344,38 +133,6 @@ class EnhancedWhatsAppAnalyzer:
             }
         }
     
-    def _call_groq_api(self, prompt: str, system_msg: str, max_tokens: int = 4000, temp: float = 0.4) -> Dict:
-        """Centralized Groq API call with error handling"""
-        try:
-            response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=temp,
-                max_tokens=max_tokens
-            )
-            
-            result_text = response.choices[0].message.content.strip()
-            result_text = self._clean_json_response(result_text)
-            return json.loads(result_text)
-        
-        except json.JSONDecodeError as e:
-            app.logger.error(f"JSON decode error: {e}")
-            raise ValueError(f"Invalid JSON response from API: {str(e)}")
-        except Exception as e:
-            app.logger.error(f"Groq API error: {e}")
-            raise
-    
-    def _clean_json_response(self, text: str) -> str:
-        """Clean markdown from JSON"""
-        if '```json' in text:
-            text = text.split('```json')[1].split('```')[0].strip()
-        elif '```' in text:
-            text = text.split('```')[1].split('```')[0].strip()
-        return text
-    
     def ai_enhanced_personality_analysis(self, sample_size: int = 600) -> Dict:
         """Enhanced personality + D&D alignment analysis"""
         sampled = self.sample_messages(sample_size, 'smart')
@@ -418,6 +175,17 @@ Provide comprehensive analysis:
    - GOOD: Supportive, kind, helps others, uplifts group
    - NEUTRAL: Balanced morality, self-focused but not harmful
    - EVIL: Teases/roasts others, sarcastic, playfully mean (not actually evil)
+   
+   Examples:
+   - Lawful Good: Organized helper, plans group activities
+   - Neutral Good: Supportive but spontaneous
+   - Chaotic Good: Random acts of kindness, unpredictable support
+   - Lawful Neutral: By-the-book, matter-of-fact
+   - True Neutral: Goes with the flow, balanced
+   - Chaotic Neutral: Pure chaos, no pattern
+   - Lawful Evil: Organized roaster, calculated sarcasm
+   - Neutral Evil: Opportunistic teaser
+   - Chaotic Evil: Random savage roasts, unpredictable meanness
 
 4. COMMUNICATION PATTERNS:
    - Who initiates serious conversations?
@@ -462,9 +230,24 @@ Respond with ONLY valid JSON:
   }}
 }}"""
         
-        system_msg = "You are a multilingual chat analysis expert. Understand Hinglish and code-switching. Respond with valid JSON only."
+        try:
+            response = self.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are a multilingual chat analysis expert. Understand Hinglish and code-switching. Respond with valid JSON only."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.4,
+                max_tokens=4000
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            result_text = self._clean_json_response(result_text)
+            return json.loads(result_text)
         
-        return self._call_groq_api(prompt, system_msg, max_tokens=4000, temp=0.4)
+        except Exception as e:
+            print(f"⚠️  Groq API error (personality): {e}")
+            return {}
     
     def ai_golden_moments_analysis(self, sample_size: int = 700) -> Dict:
         """Expanded golden moments with 8-10 categories"""
@@ -511,18 +294,33 @@ Respond with ONLY valid JSON:
   ]
 }}"""
         
-        system_msg = "You are a content curator. Find genuinely memorable moments, not generic ones. Skip categories without strong examples. Respond with JSON only."
+        try:
+            response = self.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are a content curator. Find genuinely memorable moments, not generic ones. Skip categories without strong examples. Respond with JSON only."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.5,
+                max_tokens=3500
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            result_text = self._clean_json_response(result_text)
+            parsed = json.loads(result_text)
+            
+            # Filter out low-quality moments
+            if 'golden_moments' in parsed:
+                parsed['golden_moments'] = [
+                    m for m in parsed['golden_moments']
+                    if m.get('impact_score', 0) >= 70 and len(m.get('message', '')) > 20
+                ]
+            
+            return parsed
         
-        result = self._call_groq_api(prompt, system_msg, max_tokens=3500, temp=0.5)
-        
-        # Filter out low-quality moments
-        if 'golden_moments' in result:
-            result['golden_moments'] = [
-                m for m in result['golden_moments']
-                if m.get('impact_score', 0) >= 70 and len(m.get('message', '')) > 20
-            ]
-        
-        return result
+        except Exception as e:
+            print(f"⚠️  Groq API error (golden moments): {e}")
+            return {}
     
     def ai_content_analysis(self, sample_size: int = 700) -> Dict:
         """Topics, humor, and language patterns"""
@@ -580,9 +378,24 @@ Respond with ONLY valid JSON:
   }}
 }}"""
         
-        system_msg = "You are a multilingual content analyst. Respond with JSON only."
+        try:
+            response = self.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are a multilingual content analyst. Respond with JSON only."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.5,
+                max_tokens=3500
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            result_text = self._clean_json_response(result_text)
+            return json.loads(result_text)
         
-        return self._call_groq_api(prompt, system_msg, max_tokens=3500, temp=0.5)
+        except Exception as e:
+            print(f"⚠️  Groq API error (content): {e}")
+            return {}
     
     def ai_relationship_dynamics(self, sample_size: int = 600) -> Dict:
         """Relationship analysis"""
@@ -635,9 +448,24 @@ Respond with ONLY valid JSON:
   }}
 }}"""
         
-        system_msg = "You are a social dynamics expert. Respond with JSON only."
+        try:
+            response = self.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are a social dynamics expert. Respond with JSON only."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.4,
+                max_tokens=3000
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            result_text = self._clean_json_response(result_text)
+            return json.loads(result_text)
         
-        return self._call_groq_api(prompt, system_msg, max_tokens=3000, temp=0.4)
+        except Exception as e:
+            print(f"⚠️  Groq API error (relationships): {e}")
+            return {}
     
     def ai_sentiment_timeline(self, sample_size: int = 500) -> Dict:
         """Sentiment analysis over time"""
@@ -694,13 +522,38 @@ Respond with ONLY valid JSON:
   "most_active_period": 5
 }}"""
         
-        system_msg = "You are a sentiment analyst. Respond with JSON only."
+        try:
+            response = self.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are a sentiment analyst. Respond with JSON only."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=2500
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            result_text = self._clean_json_response(result_text)
+            return json.loads(result_text)
         
-        return self._call_groq_api(prompt, system_msg, max_tokens=2500, temp=0.3)
+        except Exception as e:
+            print(f"⚠️  Groq API error (sentiment): {e}")
+            return {}
+    
+    def _clean_json_response(self, text: str) -> str:
+        """Clean markdown from JSON"""
+        if '```json' in text:
+            text = text.split('```json')[1].split('```')[0].strip()
+        elif '```' in text:
+            text = text.split('```')[1].split('```')[0].strip()
+        return text
     
     def generate_comprehensive_report(self) -> Dict:
         """Generate full analysis"""
-        app.logger.info("Starting comprehensive analysis")
+        print("\n" + "="*70)
+        print("ENHANCED AI-POWERED CHAT ANALYSIS")
+        print("="*70 + "\n")
         start_time = time.time()
         
         report = {
@@ -708,127 +561,121 @@ Respond with ONLY valid JSON:
                 'total_messages': len(self.messages),
                 'participants': self.participants,
                 'date_range': self.data.get('dateRange', {}),
-                'analysis_timestamp': datetime.utcnow().isoformat() + 'Z',
+                'analysis_timestamp': datetime.now().isoformat(),
                 'model': 'llama-3.3-70b-versatile'
             }
         }
         
-        try:
-            # Statistical baseline
-            app.logger.info("Extracting basic stats")
-            report['basic_stats'] = self.extract_basic_stats()
-            report['emoji_usage'] = self.detect_emoji_usage()
-            
-            # AI analyses
-            app.logger.info("Running personality analysis")
-            personality_data = self.ai_enhanced_personality_analysis(600)
-            report['personalities'] = personality_data.get('personalities', [])
-            report['roles'] = personality_data.get('roles', {})
-            report['alignments'] = personality_data.get('alignments', [])
-            report['communication_patterns'] = personality_data.get('communication_patterns', {})
-            time.sleep(0.5)
-            
-            app.logger.info("Running golden moments analysis")
-            moments_data = self.ai_golden_moments_analysis(700)
-            report['golden_moments'] = moments_data.get('golden_moments', [])
-            time.sleep(0.5)
-            
-            app.logger.info("Running content & humor analysis")
-            content_data = self.ai_content_analysis(700)
-            report['topics'] = content_data.get('topics', [])
-            report['humor'] = content_data.get('humor', {})
-            report['language_patterns'] = content_data.get('language_patterns', {})
-            time.sleep(0.5)
-            
-            app.logger.info("Running relationship analysis")
-            relationship_data = self.ai_relationship_dynamics(600)
-            report['closest_pairs'] = relationship_data.get('closest_pairs', [])
-            report['group_roles'] = relationship_data.get('group_roles', {})
-            report['group_dynamics'] = relationship_data.get('dynamics', {})
-            time.sleep(0.5)
-            
-            app.logger.info("Running sentiment timeline analysis")
-            sentiment_data = self.ai_sentiment_timeline(500)
-            report['sentiment_timeline'] = sentiment_data.get('timeline', [])
-            report['sentiment_trend'] = sentiment_data.get('overall_trend', 'unknown')
-            
-            elapsed = time.time() - start_time
-            report['metadata']['analysis_time_seconds'] = round(elapsed, 2)
-            
-            app.logger.info(f"Analysis complete in {elapsed:.1f}s")
-            
-            return report
-            
-        except Exception as e:
-            app.logger.error(f"Analysis failed: {str(e)}")
-            raise
+        # Statistical baseline
+        print("📊 Statistical Baseline...")
+        report['basic_stats'] = self.extract_basic_stats()
+        report['emoji_usage'] = self.detect_emoji_usage()
+        
+        # AI analyses
+        print("🤖 AI Analysis [1/5]: Personalities & D&D Alignments...")
+        personality_data = self.ai_enhanced_personality_analysis(600)
+        report['personalities'] = personality_data.get('personalities', [])
+        report['roles'] = personality_data.get('roles', {})
+        report['alignments'] = personality_data.get('alignments', [])
+        report['communication_patterns'] = personality_data.get('communication_patterns', {})
+        time.sleep(0.5)
+        
+        print("🤖 AI Analysis [2/5]: Golden Moments...")
+        moments_data = self.ai_golden_moments_analysis(700)
+        report['golden_moments'] = moments_data.get('golden_moments', [])
+        time.sleep(0.5)
+        
+        print("🤖 AI Analysis [3/5]: Content & Humor...")
+        content_data = self.ai_content_analysis(700)
+        report['topics'] = content_data.get('topics', [])
+        report['humor'] = content_data.get('humor', {})
+        report['language_patterns'] = content_data.get('language_patterns', {})
+        time.sleep(0.5)
+        
+        print("🤖 AI Analysis [4/5]: Relationships...")
+        relationship_data = self.ai_relationship_dynamics(600)
+        report['closest_pairs'] = relationship_data.get('closest_pairs', [])
+        report['group_roles'] = relationship_data.get('group_roles', {})
+        report['group_dynamics'] = relationship_data.get('dynamics', {})
+        time.sleep(0.5)
+        
+        print("🤖 AI Analysis [5/5]: Sentiment Timeline...")
+        sentiment_data = self.ai_sentiment_timeline(500)
+        report['sentiment_timeline'] = sentiment_data.get('timeline', [])
+        report['sentiment_trend'] = sentiment_data.get('overall_trend', 'unknown')
+        
+        elapsed = time.time() - start_time
+        report['metadata']['analysis_time_seconds'] = round(elapsed, 2)
+        
+        print(f"\n✅ Analysis complete in {elapsed:.1f}s\n")
+        
+        return report
 
 
-# ===== API ROUTES =====
+# ===== FLASK API =====
 
-@app.route('/', methods=['GET'])
-def root():
-    """Root endpoint with API documentation"""
-    return jsonify({
-        'service': 'WhatsApp Chat Analyzer API',
-        'version': '2.0',
-        'status': 'operational',
-        'endpoints': {
-            'health': 'GET /health - Health check',
-            'analyze': 'POST /analyze - Full comprehensive analysis',
-            'quick_analyze': 'POST /analyze/quick - Quick analysis'
-        },
-        'documentation': 'See README for payload format'
-    })
-
-
-@app.route('/health', methods=['GET', 'OPTIONS'])
+@app.route('/health', methods=['GET'])
 def health_check():
-    """Detailed health check endpoint"""
-    if request.method == 'OPTIONS':
-        return '', 204
-    
-    groq_configured = bool(Config.GROQ_API_KEY)
-    
+    """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'timestamp': datetime.utcnow().isoformat() + 'Z',
         'service': 'WhatsApp Chat Analyzer',
         'version': '2.0',
-        'environment': Config.ENV,
-        'groq_api_configured': groq_configured,
-        'rate_limiting_enabled': Config.RATELIMIT_ENABLED,
-        'cors_origins': Config.CORS_ORIGINS
+        'api_key_configured': bool(DEFAULT_GROQ_API_KEY)
     })
 
 
-@app.route('/analyze', methods=['POST', 'OPTIONS'])
-@limiter.limit("5 per hour")
-@require_api_key
-@validate_chat_data
+@app.route('/analyze', methods=['POST'])
 def analyze_chat():
     """
-    Full comprehensive analysis endpoint
+    Main analysis endpoint
     
     Expected JSON payload:
     {
-        "chat_data": {
-            "messages": [...],
-            "participants": [...],
-            "dateRange": {...}
-        },
-        "api_key": "..."  // Optional if GROQ_API_KEY env var set
+        "chat_data": { ... },  // Required: WhatsApp chat JSON
+        "api_key": "..."       // Optional: Groq API key (uses env var if not provided)
     }
     """
-    if request.method == 'OPTIONS':
-        return '', 204
-    
     try:
-        data = request.get_json()
-        chat_data = data['chat_data']
-        api_key = data.get('api_key', Config.GROQ_API_KEY)
+        # Parse request
+        if not request.is_json:
+            return jsonify({
+                'error': 'Content-Type must be application/json'
+            }), 400
         
-        app.logger.info(f"Starting analysis: {len(chat_data['messages'])} messages, {len(chat_data['participants'])} participants")
+        data = request.get_json()
+        
+        # Validate chat_data
+        if 'chat_data' not in data:
+            return jsonify({
+                'error': 'Missing required field: chat_data'
+            }), 400
+        
+        chat_data = data['chat_data']
+        
+        # Validate structure
+        required_fields = ['messages', 'participants']
+        for field in required_fields:
+            if field not in chat_data:
+                return jsonify({
+                    'error': f'chat_data missing required field: {field}'
+                }), 400
+        
+        # Get API key (priority: request > env var)
+        api_key = data.get('api_key', DEFAULT_GROQ_API_KEY)
+        
+        if not api_key:
+            return jsonify({
+                'error': 'No API key provided. Set GROQ_API_KEY environment variable or include api_key in request'
+            }), 400
+        
+        # Run analysis
+        print(f"\n{'='*70}")
+        print(f"NEW ANALYSIS REQUEST")
+        print(f"Messages: {len(chat_data['messages'])}")
+        print(f"Participants: {len(chat_data['participants'])}")
+        print(f"Using {'custom' if 'api_key' in data else 'environment'} API key")
+        print(f"{'='*70}")
         
         analyzer = EnhancedWhatsAppAnalyzer(chat_data, api_key)
         report = analyzer.generate_comprehensive_report()
@@ -838,54 +685,57 @@ def analyze_chat():
             'report': report
         })
     
-    except ValueError as e:
-        app.logger.error(f"Validation error: {str(e)}")
+    except json.JSONDecodeError as e:
         return jsonify({
-            'error': 'Validation error',
-            'message': str(e)
+            'error': 'Invalid JSON format',
+            'details': str(e)
         }), 400
     
     except Exception as e:
-        app.logger.error(f"Analysis failed: {str(e)}", exc_info=True)
+        print(f"Error during analysis: {str(e)}")
         return jsonify({
             'error': 'Analysis failed',
-            'message': str(e) if Config.DEBUG else 'An error occurred during analysis'
+            'details': str(e)
         }), 500
 
 
-@app.route('/analyze/quick', methods=['POST', 'OPTIONS'])
-@limiter.limit("10 per hour")
-@require_api_key
-@validate_chat_data
+@app.route('/analyze/quick', methods=['POST'])
 def quick_analyze():
     """
     Quick analysis endpoint (fewer API calls, faster)
-    Same payload as /analyze but with reduced sample sizes
-    """
-    if request.method == 'OPTIONS':
-        return '', 204
     
+    Same payload as /analyze but runs with reduced sample sizes
+    """
     try:
+        if not request.is_json:
+            return jsonify({'error': 'Content-Type must be application/json'}), 400
+        
         data = request.get_json()
+        
+        if 'chat_data' not in data:
+            return jsonify({'error': 'Missing required field: chat_data'}), 400
+        
         chat_data = data['chat_data']
-        api_key = data.get('api_key', Config.GROQ_API_KEY)
+        api_key = data.get('api_key', DEFAULT_GROQ_API_KEY)
         
-        app.logger.info(f"Starting quick analysis: {len(chat_data['messages'])} messages")
+        if not api_key:
+            return jsonify({
+                'error': 'No API key provided. Set GROQ_API_KEY environment variable or include api_key in request'
+            }), 400
         
+        # Quick analysis with smaller samples
         analyzer = EnhancedWhatsAppAnalyzer(chat_data, api_key)
         
         report = {
             'metadata': {
                 'total_messages': len(analyzer.messages),
                 'participants': analyzer.participants,
-                'analysis_type': 'quick',
-                'analysis_timestamp': datetime.utcnow().isoformat() + 'Z'
+                'analysis_type': 'quick'
             }
         }
         
         # Only run 2 core analyses
         report['basic_stats'] = analyzer.extract_basic_stats()
-        
         personality_data = analyzer.ai_enhanced_personality_analysis(400)
         report['personalities'] = personality_data.get('personalities', [])
         report['roles'] = personality_data.get('roles', {})
@@ -900,23 +750,22 @@ def quick_analyze():
         })
     
     except Exception as e:
-        app.logger.error(f"Quick analysis failed: {str(e)}", exc_info=True)
         return jsonify({
             'error': 'Quick analysis failed',
-            'message': str(e) if Config.DEBUG else 'An error occurred during analysis'
+            'details': str(e)
         }), 500
 
 
-# ===== MAIN =====
 if __name__ == '__main__':
     print("\n" + "="*70)
     print("🚀 Enhanced WhatsApp Analyzer API Starting...")
     print("="*70)
+    print("\nEnvironment Configuration:")
+    print(f"  GROQ_API_KEY: {'✓ Set' if DEFAULT_GROQ_API_KEY else '✗ Not set (must be provided in requests)'}")
     print("\nEndpoints:")
-    print("  GET  /              - API documentation")
-    print("  GET  /health        - Health check")
-    print("  POST /analyze       - Full comprehensive analysis")
-    print("  POST /analyze/quick - Quick analysis (2-3 API calls)")
+    print("  GET  /health          - Health check")
+    print("  POST /analyze         - Full comprehensive analysis")
+    print("  POST /analyze/quick   - Quick analysis (2-3 API calls)")
     print("\nPayload format:")
     print("""
   {
@@ -925,23 +774,10 @@ if __name__ == '__main__':
       "participants": [...],
       "dateRange": {...}
     },
-    "api_key": "optional-groq-key"
+    "api_key": "optional-groq-key"  // Optional if GROQ_API_KEY env var is set
   }
     """)
-    print("\nConfiguration:")
-    print(f"  Environment: {Config.ENV}")
-    print(f"  Debug Mode: {Config.DEBUG}")
-    print(f"  Groq API Key: {'Configured' if Config.GROQ_API_KEY else 'Not set (require in requests)'}")
-    print(f"  Rate Limiting: {'Enabled' if Config.RATELIMIT_ENABLED else 'Disabled'}")
-    print(f"  CORS Origins: {Config.CORS_ORIGINS}")
-    print(f"  Max Messages: {Config.MAX_MESSAGES:,}")
     print("="*70 + "\n")
     
-    if Config.DEBUG:
-        app.logger.warning("⚠️  Running in DEBUG mode - not suitable for production!")
-        app.run(host='0.0.0.0', port=5050, debug=True)
-    else:
-        app.logger.info("Starting in production mode")
-        app.logger.info("💡 Use gunicorn for production:")
-        app.logger.info("   gunicorn -w 4 -b 0.0.0.0:5050 --timeout 300 app:app")
-        app.run(host='0.0.0.0', port=5050)
+    # Run on all interfaces, port 5050
+    app.run(host='0.0.0.0', port=5050, debug=True)
