@@ -23,22 +23,20 @@ import os
 app = Flask(__name__)
 
 # Enhanced CORS configuration
-CORS(app, 
-     resources={r"/*": {
-         "origins": "*",
-         "methods": ["GET", "POST", "OPTIONS"],
-         "allow_headers": ["Content-Type", "Authorization"],
-         "expose_headers": ["Content-Type"],
-         "supports_credentials": False,
-         "max_age": 3600
-     }})
+CORS(app, origins=[
+    "http://localhost:5173",
+    "https://kyg-frontend.onrender.com"
+])
 
 # Additional CORS headers for preflight
 @app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+def add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    if origin in ["http://localhost:5173", "https://kyg-frontend.onrender.com"]:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"  # prevent caching issues
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
 
 DEFAULT_GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
