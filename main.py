@@ -1,11 +1,10 @@
 """
-Enhanced WhatsApp Chat Analyzer - Flask API
-Improvements:
-- Nuanced D&D alignments based on behavior patterns
-- 8-10 golden moment categories with filtering
-- Expanded spicy roles (Drama Queen, Meme Lord, Ghost, etc.)
-- Flask API with JSON upload and optional API key
-- Environment variable configuration for deployment
+Enhanced Token-Optimized WhatsApp Chat Analyzer v3.1
+- Improved multi-strategy sampling (temporal + hotspots + quality)
+- Better conversation thread detection
+- More efficient token usage
+- Context messages for golden moments
+- Extended meme analysis
 """
 
 from flask import Flask, request, jsonify
@@ -15,697 +14,629 @@ import re
 from collections import defaultdict, Counter
 from datetime import datetime
 import statistics
-from typing import List, Dict, Tuple
+from typing import List, Dict
 import time
 import random
 from groq import Groq
 import os
 
 app = Flask(__name__)
-CORS(app)
 
-# Get API key from environment variable
+# Enhanced CORS configuration
+CORS(app, 
+     resources={r"/*": {
+         "origins": "*",
+         "methods": ["GET", "POST", "OPTIONS"],
+         "allow_headers": ["Content-Type", "Authorization"],
+         "expose_headers": ["Content-Type"],
+         "supports_credentials": False,
+         "max_age": 3600
+     }})
+
+# Additional CORS headers for preflight
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    return response
+
 DEFAULT_GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
 
 
-class EnhancedWhatsAppAnalyzer:
+class OptimizedWhatsAppAnalyzer:
     def __init__(self, chat_data: dict, groq_api_key: str):
-        """Initialize analyzer with chat data and Groq API"""
         self.data = chat_data
-        self.messages = self.data['messages']
+        self.all_messages = self.data['messages']  # Keep original
         
         excluded = ['Meta AI', '+91']
         self.participants = [p for p in self.data['participants'] 
                            if not any(ex in p for ex in excluded)]
-        self.stats = self.data.get('stats', {})
         self.client = Groq(api_key=groq_api_key)
         
-        self.messages = [m for m in self.messages if m['sender'] in self.participants]
+        # Filter messages but keep originals indexed
+        self.messages = [m for m in self.all_messages if m['sender'] in self.participants]
         
-        print(f"✓ Loaded {len(self.messages):,} messages from {len(self.participants)} participants")
-    
-    def sample_messages(self, n: int = 500, strategy: str = 'smart') -> List[Dict]:
-        """Intelligent sampling for maximum diversity"""
-        if n >= len(self.messages):
-            return self.messages
+        # Create index for context extraction (before preprocessing)
+        self.message_index = {i: msg for i, msg in enumerate(self.messages)}
         
-        if strategy == 'random':
-            return random.sample(self.messages, n)
-        elif strategy == 'distributed':
-            step = len(self.messages) // n
-            return [self.messages[i] for i in range(0, len(self.messages), step)][:n]
-        elif strategy == 'smart':
-            distributed_n = int(n * 0.4)
-            long_n = int(n * 0.4)
-            random_n = n - distributed_n - long_n
-            
-            step = len(self.messages) // distributed_n if distributed_n > 0 else 1
-            distributed = [self.messages[i] for i in range(0, len(self.messages), step)][:distributed_n]
-            
-            sorted_by_length = sorted(self.messages, key=lambda x: len(x['message']), reverse=True)
-            long_messages = sorted_by_length[:long_n]
-            
-            remaining = [m for m in self.messages if m not in distributed and m not in long_messages]
-            random_sample = random.sample(remaining, min(random_n, len(remaining)))
-            
-            combined = distributed + long_messages + random_sample
-            random.shuffle(combined)
-            return combined
+        # Preprocess for quality
+        self.processed_messages = self._preprocess_messages()
         
-        return self.messages[:n]
+        print(f"✓ Loaded {len(self.processed_messages):,} quality messages from {len(self.participants)} participants")
     
-    def format_messages_for_llm(self, messages: List[Dict], max_msgs: int = 100) -> str:
-        """Format messages for LLM context"""
-        context = ""
-        for msg in messages[:max_msgs]:
-            sender = msg['sender']
-            text = msg['message'][:200]
-            date = msg.get('date', '')
-            context += f"[{date}] {sender}: {text}\n"
-        return context
-    
-    def detect_emoji_usage(self) -> Dict[str, int]:
-        """Count emoji usage per person"""
-        emoji_pattern = re.compile(
-            r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF'
-            r'\U0001F1E0-\U0001F1FF\U00002702-\U000027B0\U000024C2-\U0001F251]+'
-        )
-        emoji_counts = defaultdict(int)
+    def _preprocess_messages(self) -> List[Dict]:
+        """Remove noise and low-value messages"""
+        cleaned = []
+        seen_texts = set()
         
         for msg in self.messages:
-            emojis = emoji_pattern.findall(msg['message'])
-            emoji_counts[msg['sender']] += len(emojis)
-        
-        return dict(emoji_counts)
-    
-    def extract_basic_stats(self) -> Dict:
-        """Quick statistical baseline"""
-        msg_lengths = defaultdict(list)
-        response_times = defaultdict(list)
-        
-        for i, msg in enumerate(self.messages):
-            sender = msg['sender']
-            msg_lengths[sender].append(len(msg['message']))
+            text = msg['message'].strip()
             
-            if i > 0 and self.messages[i-1]['sender'] != sender:
-                try:
-                    curr_time = datetime.strptime(
-                        f"{msg['date']} {msg['time']}", "%d/%m/%y %H:%M"
-                    )
-                    prev_time = datetime.strptime(
-                        f"{self.messages[i-1]['date']} {self.messages[i-1]['time']}", 
-                        "%d/%m/%y %H:%M"
-                    )
-                    delta = (curr_time - prev_time).total_seconds() / 60
-                    if delta < 60:
-                        response_times[sender].append(delta)
-                except:
-                    pass
+            # Skip noise
+            if len(text) < 3:
+                continue
+            if text in ['👍', '👎', '❤️', '😂', '🙏']:
+                continue
+            if text.lower() in ['ok', 'okay', 'k', 'hmm', 'yes', 'no', 'haan', 'nahi']:
+                continue
+            if text == '<Media omitted>':
+                continue
+            
+            # Skip duplicates
+            msg_key = f"{msg['sender']}:{text[:50]}"
+            if msg_key in seen_texts:
+                continue
+            seen_texts.add(msg_key)
+            
+            cleaned.append(msg)
+        
+        return cleaned
+    
+    def get_context_messages(self, message_text: str, sender: str, before: int = 2, after: int = 1) -> List[Dict]:
+        """Extract context messages around a target message"""
+        try:
+            # Find the message in original messages
+            target_idx = None
+            for idx, msg in self.message_index.items():
+                if msg['sender'] == sender and message_text[:30].lower() in msg['message'].lower():
+                    target_idx = idx
+                    break
+            
+            if target_idx is None:
+                return []
+            
+            context = []
+            # Get before messages
+            for i in range(max(0, target_idx - before), target_idx):
+                if i in self.message_index:
+                    msg = self.message_index[i]
+                    if msg['message'] != '<Media omitted>' and len(msg['message']) > 2:
+                        context.append(msg)
+            
+            # Add target
+            context.append(self.message_index[target_idx])
+            
+            # Get after messages
+            for i in range(target_idx + 1, min(len(self.message_index), target_idx + after + 1)):
+                if i in self.message_index:
+                    msg = self.message_index[i]
+                    if msg['message'] != '<Media omitted>' and len(msg['message']) > 2:
+                        context.append(msg)
+            
+            return context[-4:]  # Max 4 messages
+        except Exception as e:
+            print(f"⚠️ Context extraction error: {e}")
+            return []
+    
+    def _temporal_stratified_sample(self, n: int) -> List[Dict]:
+        """Sample evenly across chat timeline for temporal coverage"""
+        if n >= len(self.processed_messages):
+            return self.processed_messages
+        
+        # Divide into time buckets (5 periods: early, early-mid, mid, mid-late, late)
+        num_buckets = 5
+        bucket_size = len(self.processed_messages) // num_buckets
+        per_bucket = n // num_buckets
+        
+        samples = []
+        for i in range(num_buckets):
+            start = i * bucket_size
+            end = start + bucket_size if i < num_buckets - 1 else len(self.processed_messages)
+            bucket = self.processed_messages[start:end]
+            
+            if len(bucket) <= per_bucket:
+                samples.extend(bucket)
+            else:
+                # Take evenly spaced messages from bucket
+                step = max(1, len(bucket) // per_bucket)
+                samples.extend([bucket[j] for j in range(0, len(bucket), step)][:per_bucket])
+        
+        return samples
+    
+    def _activity_hotspot_sample(self, n: int) -> List[Dict]:
+        """
+        Identify periods with high activity (interesting conversations)
+        and sample conversation threads from them
+        """
+        if n >= len(self.processed_messages):
+            return self.processed_messages
+        
+        # Calculate activity density (messages per time window)
+        window_size = 20  # messages per window
+        hotspots = []
+        
+        for i in range(0, len(self.processed_messages) - window_size, 5):
+            window = self.processed_messages[i:i + window_size]
+            
+            # Score this window
+            score = 0
+            unique_senders = len(set(msg['sender'] for msg in window))
+            avg_length = sum(len(msg['message']) for msg in window) / len(window)
+            
+            score += unique_senders * 10  # Conversation diversity
+            score += min(avg_length / 5, 20)  # Substantial messages
+            
+            # Check for engagement indicators
+            for msg in window:
+                text = msg['message'].lower()
+                if '?' in text:
+                    score += 5
+                if any(word in text for word in ['haha', 'lol', 'omg', 'wtf', '😂', '🤣']):
+                    score += 3
+            
+            hotspots.append((score, i, window))
+        
+        # Sort by score and take top hotspots
+        hotspots.sort(reverse=True, key=lambda x: x[0])
+        
+        # Sample conversation threads from hotspots
+        samples = []
+        threads_needed = max(1, n // 3)  # Each thread ~3 messages
+        
+        for score, start_idx, window in hotspots[:threads_needed]:
+            if len(samples) >= n:
+                break
+            # Take 2-4 consecutive messages from this hotspot
+            thread_start = random.randint(0, max(0, len(window) - 4))
+            thread_length = random.randint(2, 4)
+            thread = window[thread_start:thread_start + thread_length]
+            samples.extend(thread)
+        
+        return samples[:n]
+    
+    def _quality_based_sample(self, n: int) -> List[Dict]:
+        """Sample high-quality individual messages"""
+        scored = []
+        
+        for msg in self.processed_messages:
+            score = 0
+            text = msg['message']
+            text_lower = text.lower()
+            
+            # Length (but not too long)
+            length_score = min(len(text) / 8, 25) - (max(0, len(text) - 200) / 10)
+            score += length_score
+            
+            # Questions and engagement
+            if '?' in text:
+                score += 15
+            if any(word in text_lower for word in ['why', 'how', 'what', 'when', 'where']):
+                score += 8
+            
+            # Emotional/interesting content
+            interesting_words = [
+                'love', 'hate', 'amazing', 'terrible', 'crazy', 'wtf', 'omg',
+                'literally', 'honestly', 'obviously', 'actually', 'seriously'
+            ]
+            score += sum(3 for word in interesting_words if word in text_lower)
+            
+            # Reactions and humor
+            humor_indicators = ['haha', 'lol', 'lmao', 'rofl', '😂', '🤣', '💀']
+            score += sum(4 for indicator in humor_indicators if indicator in text_lower)
+            
+            scored.append((score, msg))
+        
+        # Sort and take top
+        scored.sort(reverse=True, key=lambda x: x[0])
+        return [msg for score, msg in scored[:n]]
+    
+    def smart_sample(self, n: int = 350) -> List[Dict]:
+        """
+        Multi-strategy sampling for better coverage:
+        - 30% temporal stratification (timeline coverage)
+        - 40% activity hotspots (interesting conversations)
+        - 30% quality-based (best individual messages)
+        """
+        if n >= len(self.processed_messages):
+            return self.processed_messages
+        
+        # Allocate samples across strategies
+        temporal_count = int(n * 0.30)
+        hotspot_count = int(n * 0.40)
+        quality_count = int(n * 0.30)
+        
+        print(f"  📍 Sampling strategy: {temporal_count} temporal + {hotspot_count} hotspots + {quality_count} quality")
+        
+        # 1. Temporal Stratification
+        temporal_samples = self._temporal_stratified_sample(temporal_count)
+        
+        # 2. Activity Hotspots
+        hotspot_samples = self._activity_hotspot_sample(hotspot_count)
+        
+        # 3. Quality-based
+        quality_samples = self._quality_based_sample(quality_count)
+        
+        # Combine and deduplicate
+        all_samples = temporal_samples + hotspot_samples + quality_samples
+        seen = set()
+        unique = []
+        
+        for msg in all_samples:
+            key = f"{msg['sender']}:{msg['message'][:30]}"
+            if key not in seen:
+                seen.add(key)
+                unique.append(msg)
+        
+        # Shuffle to mix strategies
+        random.shuffle(unique)
+        final = unique[:n]
+        
+        print(f"  ✓ Sampled {len(final)} diverse messages")
+        return final
+    
+    def format_for_llm(self, messages: List[Dict], max_chars: int = 100) -> str:
+        """
+        Ultra-compact formatting to fit more messages:
+        - First name only (max 8 chars)
+        - Aggressive truncation
+        - Remove extra whitespace
+        """
+        lines = []
+        for msg in messages:
+            # Get first name only, limit to 8 chars
+            sender = msg['sender'].split()[0][:8]
+            
+            # Truncate and clean message
+            text = msg['message'][:max_chars].strip()
+            text = ' '.join(text.split())  # Remove extra whitespace
+            
+            lines.append(f"{sender}: {text}")
+        
+        return '\n'.join(lines)
+    
+    def extract_quick_stats(self) -> Dict:
+        """Fast statistical analysis"""
+        msg_counts = Counter(msg['sender'] for msg in self.processed_messages)
+        msg_lengths = defaultdict(list)
+        
+        for msg in self.processed_messages:
+            msg_lengths[msg['sender']].append(len(msg['message']))
         
         return {
-            'avg_message_length': {
+            'message_counts': dict(msg_counts),
+            'avg_length': {
                 p: round(statistics.mean(msg_lengths[p]), 1) 
                 for p in self.participants if msg_lengths[p]
             },
-            'avg_response_time_minutes': {
-                p: round(statistics.mean(response_times[p]), 1)
-                for p in self.participants if response_times[p]
-            }
+            'total_analyzed': len(self.processed_messages)
         }
     
-    def ai_enhanced_personality_analysis(self, sample_size: int = 600) -> Dict:
-        """Enhanced personality + D&D alignment analysis"""
-        sampled = self.sample_messages(sample_size, 'smart')
-        context = self.format_messages_for_llm(sampled, max_msgs=120)
+    def ai_core_analysis(self, sample_size: int = 400) -> Dict:
+        """COMBINED: Personality + Roles + Alignments + Relationships"""
+        sampled = self.smart_sample(sample_size)
+        context = self.format_for_llm(sampled, max_chars=90)
         
-        prompt = f"""Analyze this multilingual WhatsApp chat (English/Hinglish/mixed languages).
-
-PARTICIPANTS: {', '.join(self.participants)}
+        prompt = f"""Analyze WhatsApp chat (English/Hinglish). {len(self.participants)} people: {', '.join(self.participants)}
 
 MESSAGES:
 {context}
 
-Provide comprehensive analysis:
+Provide CONCISE analysis:
 
-1. PERSONALITY PROFILES: For each participant:
-   - Communication style (formal/casual/energetic/calm/aggressive/passive)
-   - Emotional tone (supportive/sarcastic/neutral/humorous/dramatic)
-   - Key traits (3-4 specific traits)
+1. PERSONALITY (for each person):
+   - Style: formal/casual/energetic/calm
+   - Tone: supportive/sarcastic/humorous/dramatic
+   - 3 key traits
 
-2. ENHANCED ROLES (score 0-100 with specific examples):
-   - Therapist: Most emotionally supportive
-   - Hype Man: Most encouraging/energetic
-   - Comedian: Funniest/most entertaining
-   - Intellectual: Most thoughtful/insightful
-   - Peacemaker: Best at diffusing tension
-   - Drama Queen: Most dramatic/attention-seeking
-   - Meme Lord: Best at memes/internet culture
-   - Ghost: Lurks then appears with perfect timing
-   - Chaos Agent: Creates fun chaos/unpredictability
-   - Voice of Reason: Most logical/grounded
-   - Oversharer: Shares the most personal details
-   - Conspiracy Theorist: Most random theories/wild takes
+2. TOP ROLES (top scorer for each, 0-100):
+   - Therapist: Most supportive
+   - Hype Man: Most encouraging
+   - Comedian: Funniest
+   - Drama Queen: Most dramatic
+   - Meme Lord: Best memes
+   - Ghost: Lurks then appears
+   - Voice of Reason: Most logical
+   - Chaos Agent: Creates fun chaos
 
-3. D&D ALIGNMENT (be specific and nuanced):
-   Assign alignment based on:
-   - LAWFUL: Structured, rule-following, organized, planners
-   - NEUTRAL: Balanced, adaptable, situation-dependent
-   - CHAOTIC: Spontaneous, unpredictable, rule-breaking, random
-   
-   - GOOD: Supportive, kind, helps others, uplifts group
-   - NEUTRAL: Balanced morality, self-focused but not harmful
-   - EVIL: Teases/roasts others, sarcastic, playfully mean (not actually evil)
-   
-   Examples:
-   - Lawful Good: Organized helper, plans group activities
-   - Neutral Good: Supportive but spontaneous
-   - Chaotic Good: Random acts of kindness, unpredictable support
-   - Lawful Neutral: By-the-book, matter-of-fact
-   - True Neutral: Goes with the flow, balanced
-   - Chaotic Neutral: Pure chaos, no pattern
-   - Lawful Evil: Organized roaster, calculated sarcasm
-   - Neutral Evil: Opportunistic teaser
-   - Chaotic Evil: Random savage roasts, unpredictable meanness
+3. D&D ALIGNMENT (one per person):
+   Lawful/Neutral/Chaotic + Good/Neutral/Evil
+   Based on: structure vs spontaneity + supportive vs teasing
 
-4. COMMUNICATION PATTERNS:
-   - Who initiates serious conversations?
-   - Who keeps things light?
-   - Who maintains group connection?
+4. RELATIONSHIPS:
+   - Top 2-3 closest pairs
+   - Bond type + why
 
-Respond with ONLY valid JSON:
+Return ONLY valid JSON:
 {{
-  "personalities": [
-    {{
-      "name": "PersonName",
-      "style": "description",
-      "tone": "description",
-      "traits": ["trait1", "trait2", "trait3", "trait4"]
-    }}
-  ],
-  "roles": {{
-    "therapist": {{"name": "Name", "score": 85, "reason": "specific examples"}},
-    "hype_man": {{"name": "Name", "score": 90, "reason": "specific examples"}},
-    "comedian": {{"name": "Name", "score": 88, "reason": "specific examples"}},
-    "intellectual": {{"name": "Name", "score": 82, "reason": "specific examples"}},
-    "peacemaker": {{"name": "Name", "score": 75, "reason": "specific examples"}},
-    "drama_queen": {{"name": "Name", "score": 80, "reason": "specific examples"}},
-    "meme_lord": {{"name": "Name", "score": 85, "reason": "specific examples"}},
-    "ghost": {{"name": "Name", "score": 70, "reason": "specific examples"}},
-    "chaos_agent": {{"name": "Name", "score": 88, "reason": "specific examples"}},
-    "voice_of_reason": {{"name": "Name", "score": 83, "reason": "specific examples"}},
-    "oversharer": {{"name": "Name", "score": 77, "reason": "specific examples"}},
-    "conspiracy_theorist": {{"name": "Name", "score": 72, "reason": "specific examples"}}
-  }},
-  "alignments": [
-    {{
-      "name": "Person1",
-      "alignment": "Chaotic Good",
-      "reason": "specific behavioral evidence"
-    }}
-  ],
-  "communication_patterns": {{
-    "serious_initiator": "Name",
-    "lightness_keeper": "Name",
-    "connection_maintainer": "Name"
-  }}
+  "personalities": [{{"name": "X", "style": "...", "tone": "...", "traits": ["a","b","c"]}}],
+  "roles": {{"therapist": {{"name": "X", "score": 90, "reason": "brief"}}, "hype_man": {{"name": "X", "score": 85, "reason": "..."}}, ...}},
+  "alignments": [{{"name": "X", "alignment": "Chaotic Good", "reason": "brief"}}],
+  "pairs": [{{"pair": ["X","Y"], "bond": "type", "reason": "brief"}}]
 }}"""
         
         try:
             response = self.client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
-                    {"role": "system", "content": "You are a multilingual chat analysis expert. Understand Hinglish and code-switching. Respond with valid JSON only."},
+                    {"role": "system", "content": "You are a chat analyst. Return ONLY valid JSON, no markdown."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.4,
-                max_tokens=4000
-            )
-            
-            result_text = response.choices[0].message.content.strip()
-            result_text = self._clean_json_response(result_text)
-            return json.loads(result_text)
-        
-        except Exception as e:
-            print(f"⚠️  Groq API error (personality): {e}")
-            return {}
-    
-    def ai_golden_moments_analysis(self, sample_size: int = 700) -> Dict:
-        """Expanded golden moments with 8-10 categories"""
-        sampled = self.sample_messages(sample_size, 'smart')
-        context = self.format_messages_for_llm(sampled, max_msgs=150)
-        
-        prompt = f"""Analyze memorable moments in this multilingual chat.
-
-PARTICIPANTS: {', '.join(self.participants)}
-
-MESSAGES:
-{context}
-
-Find the BEST examples for each category. Each must be:
-- Actually impactful/meaningful/funny (not generic)
-- Have clear context
-- Representative of the category
-- Include actual message snippet (30-100 chars)
-
-GOLDEN MOMENT CATEGORIES:
-1. Most Wholesome: Genuinely heartwarming message
-2. Most Savage: Wittiest roast/comeback
-3. Most Random: Hilariously out-of-context
-4. Most Inspirational: Motivational/uplifting
-5. Most Cringe: Awkward but funny
-6. Most Relatable: Universal "same bro" moment
-7. Most Unhinged: Absolutely wild/crazy statement
-8. Plot Twist: Unexpected conversation turn
-9. Mic Drop: Perfect conversation ender
-10. Big Brain: Brilliant insight/solution
-
-ONLY include categories where you found CLEAR, STRONG examples. Skip if no good match.
-
-Respond with ONLY valid JSON:
-{{
-  "golden_moments": [
-    {{
-      "category": "Most Savage",
-      "sender": "Name",
-      "message": "message snippet (30-100 chars)",
-      "context": "why this is perfect for category",
-      "impact_score": 95
-    }}
-  ]
-}}"""
-        
-        try:
-            response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "You are a content curator. Find genuinely memorable moments, not generic ones. Skip categories without strong examples. Respond with JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.5,
-                max_tokens=3500
-            )
-            
-            result_text = response.choices[0].message.content.strip()
-            result_text = self._clean_json_response(result_text)
-            parsed = json.loads(result_text)
-            
-            # Filter out low-quality moments
-            if 'golden_moments' in parsed:
-                parsed['golden_moments'] = [
-                    m for m in parsed['golden_moments']
-                    if m.get('impact_score', 0) >= 70 and len(m.get('message', '')) > 20
-                ]
-            
-            return parsed
-        
-        except Exception as e:
-            print(f"⚠️  Groq API error (golden moments): {e}")
-            return {}
-    
-    def ai_content_analysis(self, sample_size: int = 700) -> Dict:
-        """Topics, humor, and language patterns"""
-        sampled = self.sample_messages(sample_size, 'smart')
-        context = self.format_messages_for_llm(sampled, max_msgs=150)
-        
-        prompt = f"""Analyze content themes in this multilingual chat.
-
-PARTICIPANTS: {', '.join(self.participants)}
-
-MESSAGES:
-{context}
-
-Analyze:
-
-1. TOP TOPICS (top 10):
-   - Topic name
-   - Frequency (high/medium/low)
-   - Key participants
-   - Sample keywords (including Hinglish)
-
-2. HUMOR ANALYSIS:
-   - Top 5 funniest messages with context
-   - Top 5 sarcastic moments
-   - Inside jokes (recurring phrases)
-
-3. LANGUAGE PATTERNS:
-   - Unique slang/Hinglish terms
-   - Code-switching patterns
-
-Respond with ONLY valid JSON:
-{{
-  "topics": [
-    {{
-      "topic": "Topic Name",
-      "frequency": "high",
-      "participants": ["Name1"],
-      "keywords": ["word1", "word2"]
-    }}
-  ],
-  "humor": {{
-    "funniest": [
-      {{"sender": "Name", "message": "snippet", "why": "explanation"}}
-    ],
-    "sarcasm": [
-      {{"sender": "Name", "message": "snippet", "context": "why sarcastic"}}
-    ],
-    "inside_jokes": [
-      {{"phrase": "recurring phrase", "usage": "how used", "frequency": "medium"}}
-    ]
-  }},
-  "language_patterns": {{
-    "unique_slang": ["term1", "term2"],
-    "code_switching": "description"
-  }}
-}}"""
-        
-        try:
-            response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "You are a multilingual content analyst. Respond with JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.5,
-                max_tokens=3500
-            )
-            
-            result_text = response.choices[0].message.content.strip()
-            result_text = self._clean_json_response(result_text)
-            return json.loads(result_text)
-        
-        except Exception as e:
-            print(f"⚠️  Groq API error (content): {e}")
-            return {}
-    
-    def ai_relationship_dynamics(self, sample_size: int = 600) -> Dict:
-        """Relationship analysis"""
-        sampled = self.sample_messages(sample_size, 'smart')
-        context = self.format_messages_for_llm(sampled, max_msgs=120)
-        
-        prompt = f"""Analyze relationships in this chat.
-
-PARTICIPANTS: {', '.join(self.participants)}
-
-MESSAGES:
-{context}
-
-Analyze:
-
-1. CLOSEST PAIRS: Top 3-5 pairs with:
-   - Bond type
-   - Dynamic description
-   - Evidence
-
-2. GROUP DYNAMICS:
-   - Energy Matcher: Best at matching others' vibe
-   - Conflict Resolver: Calms arguments
-   - Topic Starter: Initiates discussions
-   - Silent Observer: Selective but meaningful participation
-
-3. INTERACTION PATTERNS:
-   - Response patterns
-   - Leadership style
-
-Respond with ONLY valid JSON:
-{{
-  "closest_pairs": [
-    {{
-      "pair": ["Person1", "Person2"],
-      "bond_type": "type",
-      "dynamic": "description",
-      "evidence": "examples"
-    }}
-  ],
-  "group_roles": {{
-    "energy_matcher": {{"name": "Name", "score": 85, "reason": "why"}},
-    "conflict_resolver": {{"name": "Name", "score": 80, "reason": "why"}},
-    "topic_starter": {{"name": "Name", "score": 90, "reason": "why"}},
-    "silent_observer": {{"name": "Name", "score": 75, "reason": "why"}}
-  }},
-  "dynamics": {{
-    "leadership": "description",
-    "subgroups": "description or null"
-  }}
-}}"""
-        
-        try:
-            response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "You are a social dynamics expert. Respond with JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.4,
-                max_tokens=3000
-            )
-            
-            result_text = response.choices[0].message.content.strip()
-            result_text = self._clean_json_response(result_text)
-            return json.loads(result_text)
-        
-        except Exception as e:
-            print(f"⚠️  Groq API error (relationships): {e}")
-            return {}
-    
-    def ai_sentiment_timeline(self, sample_size: int = 500) -> Dict:
-        """Sentiment analysis over time"""
-        sampled = self.sample_messages(sample_size, 'distributed')
-        
-        period_size = len(sampled) // 8
-        periods = [sampled[i:i+period_size] for i in range(0, len(sampled), period_size)]
-        
-        period_summaries = []
-        for idx, period in enumerate(periods[:8]):
-            if not period:
-                continue
-            
-            date_range = f"{period[0]['date']} to {period[-1]['date']}"
-            context = self.format_messages_for_llm(period, max_msgs=30)
-            
-            period_summaries.append({
-                'period': idx + 1,
-                'date_range': date_range,
-                'sample': context
-            })
-        
-        periods_text = "\n\n".join([
-            f"PERIOD {p['period']} ({p['date_range']}):\n{p['sample']}"
-            for p in period_summaries
-        ])
-        
-        prompt = f"""Analyze sentiment evolution.
-
-PARTICIPANTS: {', '.join(self.participants)}
-
-{periods_text}
-
-For each period:
-1. Mood (positive/neutral/negative/mixed)
-2. Energy (high/medium/low)
-3. Key themes
-4. Shifts from previous
-
-Respond with ONLY valid JSON:
-{{
-  "timeline": [
-    {{
-      "period": 1,
-      "date_range": "range",
-      "mood": "positive",
-      "energy": "high",
-      "themes": ["theme1"],
-      "shift": "change description"
-    }}
-  ],
-  "overall_trend": "improving/stable/declining/fluctuating",
-  "healthiest_period": 3,
-  "most_active_period": 5
-}}"""
-        
-        try:
-            response = self.client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "You are a sentiment analyst. Respond with JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
                 max_tokens=2500
             )
             
-            result_text = response.choices[0].message.content.strip()
-            result_text = self._clean_json_response(result_text)
-            return json.loads(result_text)
-        
+            result = self._clean_json(response.choices[0].message.content)
+            parsed = json.loads(result)
+            print(f"✓ Core analysis complete: {len(parsed.get('personalities', []))} personalities")
+            return parsed
         except Exception as e:
-            print(f"⚠️  Groq API error (sentiment): {e}")
-            return {}
+            print(f"⚠️ Core analysis error: {e}")
+            return {
+                'personalities': [],
+                'roles': {},
+                'alignments': [],
+                'pairs': []
+            }
     
-    def _clean_json_response(self, text: str) -> str:
-        """Clean markdown from JSON"""
+    def ai_content_analysis(self, sample_size: int = 500) -> Dict:
+        """COMBINED: Topics + Golden Moments + Memes + Humor + Sentiment"""
+        sampled = self.smart_sample(sample_size)
+        context = self.format_for_llm(sampled, max_chars=95)
+        
+        prompt = f"""Analyze chat content. {len(self.participants)} people: {', '.join(self.participants)}
+
+MESSAGES:
+{context}
+
+Provide detailed analysis:
+
+1. TOP 5 TOPICS:
+   - Topic name, frequency (high/medium/low), keywords
+
+2. GOLDEN MOMENTS (8-12 categories, BEST examples only):
+   Categories: Most Wholesome, Most Savage, Most Random, Most Inspirational, 
+   Most Cringe, Most Relatable, Most Unhinged, Plot Twist, Mic Drop, Big Brain,
+   Main Character Energy, Villain Arc
+   
+   For each:
+   - Category name
+   - Sender name
+   - Actual message text (40-120 chars) - MUST be exact quote
+   - Why it's golden (brief)
+   - Impact score 75-100
+
+3. MEME ANALYSIS (Find REAL examples):
+   a) Dank Moments (3-4): Peak internet humor
+   b) Cursed Content (2-3): Unhinged messages  
+   c) Copypasta Potential (2-3): Could become memes
+   d) Reaction Worthy (2-3): Got big reactions
+   e) Inside Jokes (2-3): Recurring references
+   f) Ratio Moments (2): Got roasted hard
+   g) NPC Energy (2): Predictable responses
+
+4. HUMOR (actual examples):
+   - Top 3 funniest moments
+   - Top 2 sarcastic burns
+   - 2 unintentionally funny
+
+5. SENTIMENT:
+   - Mood, energy, vibe
+
+Return ONLY valid JSON:
+{{
+  "topics": [{{"topic": "Dating Drama", "frequency": "high", "keywords": ["crush","date","relationship"]}}],
+  "golden_moments": [{{"category": "Most Savage", "sender": "Alice", "message": "actual quote here", "why": "destroyed Bob's ego", "impact_score": 92}}],
+  "memes": {{
+    "dank_moments": [{{"sender": "X", "message": "quote", "why_dank": "reason"}}],
+    "cursed": [{{"sender": "X", "message": "quote", "cursed_level": "high"}}],
+    "copypasta_potential": [{{"sender": "X", "message": "quote", "meme_format": "format"}}],
+    "reaction_worthy": [{{"sender": "X", "message": "quote", "reaction": "how others reacted"}}],
+    "inside_jokes": [{{"phrase": "catchphrase", "context": "when used", "frequency": "often"}}],
+    "ratio_moments": [{{"victim": "X", "roaster": "Y", "message": "the roast"}}],
+    "npc_energy": [{{"sender": "X", "pattern": "repeated phrase/behavior"}}]
+  }},
+  "humor": {{
+    "funniest": [{{"sender": "X", "message": "quote", "why": "reason"}}],
+    "sarcasm": [{{"sender": "X", "message": "quote", "target": "who"}}],
+    "unintentional": [{{"sender": "X", "message": "quote", "why_funny": "reason"}}]
+  }},
+  "sentiment": {{"mood": "positive", "energy": "high", "vibe": "chaotic friendly"}}
+}}"""
+        
+        try:
+            response = self.client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are a meme analyst and content curator. Find the BEST moments. Return ONLY valid JSON, no markdown."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.6,
+                max_tokens=3500
+            )
+            
+            result = self._clean_json(response.choices[0].message.content)
+            parsed = json.loads(result)
+            
+            # Validate and log
+            print(f"✓ Content analysis complete:")
+            print(f"  - Topics: {len(parsed.get('topics', []))}")
+            print(f"  - Golden moments: {len(parsed.get('golden_moments', []))}")
+            print(f"  - Meme categories: {len(parsed.get('memes', {}).keys())}")
+            print(f"  - Humor items: {len(parsed.get('humor', {}).get('funniest', []))}")
+            
+            return parsed
+        except json.JSONDecodeError as e:
+            print(f"⚠️ JSON parsing error: {e}")
+            print(f"Raw response: {result[:200]}...")
+            return self._get_empty_content_structure()
+        except Exception as e:
+            print(f"⚠️ Content analysis error: {e}")
+            return self._get_empty_content_structure()
+    
+    def _get_empty_content_structure(self) -> Dict:
+        """Return empty but valid structure"""
+        return {
+            'topics': [],
+            'golden_moments': [],
+            'memes': {
+                'dank_moments': [],
+                'cursed': [],
+                'copypasta_potential': [],
+                'reaction_worthy': [],
+                'inside_jokes': [],
+                'ratio_moments': [],
+                'npc_energy': []
+            },
+            'humor': {
+                'funniest': [],
+                'sarcasm': [],
+                'unintentional': []
+            },
+            'sentiment': {
+                'mood': 'unknown',
+                'energy': 'unknown',
+                'vibe': 'analysis failed'
+            }
+        }
+    
+    def enhance_moments_with_context(self, moments: List[Dict]) -> List[Dict]:
+        """Add context chat to golden moments"""
+        enhanced = []
+        for moment in moments:
+            try:
+                sender = moment.get('sender', '')
+                message_text = moment.get('message', '')
+                
+                if sender and message_text:
+                    context = self.get_context_messages(message_text, sender, before=2, after=1)
+                    
+                    if context:
+                        moment['context_chat'] = [
+                            {
+                                'sender': msg['sender'].split()[0],
+                                'message': msg['message'][:150]
+                            }
+                            for msg in context
+                        ]
+                    else:
+                        moment['context_chat'] = []
+                
+                enhanced.append(moment)
+            except Exception as e:
+                print(f"⚠️ Context enhancement error: {e}")
+                moment['context_chat'] = []
+                enhanced.append(moment)
+        
+        return enhanced
+    
+    def _clean_json(self, text: str) -> str:
+        """Extract JSON from markdown and clean it"""
+        # Remove markdown code blocks
         if '```json' in text:
-            text = text.split('```json')[1].split('```')[0].strip()
+            text = text.split('```json')[1].split('```')[0]
         elif '```' in text:
-            text = text.split('```')[1].split('```')[0].strip()
+            text = text.split('```')[1].split('```')[0]
+        
+        # Find JSON object
+        text = text.strip()
+        
+        # Try to find JSON boundaries
+        start = text.find('{')
+        end = text.rfind('}')
+        
+        if start != -1 and end != -1:
+            text = text[start:end+1]
+        
         return text
     
-    def generate_comprehensive_report(self) -> Dict:
-        """Generate full analysis"""
-        print("\n" + "="*70)
-        print("ENHANCED AI-POWERED CHAT ANALYSIS")
-        print("="*70 + "\n")
-        start_time = time.time()
+    def generate_report(self) -> Dict:
+        """Generate optimized analysis report"""
+        print("\n" + "="*60)
+        print("ENHANCED CHAT ANALYSIS v3.1")
+        print("="*60 + "\n")
+        start = time.time()
         
         report = {
             'metadata': {
-                'total_messages': len(self.messages),
+                'total_messages': len(self.processed_messages),
                 'participants': self.participants,
-                'date_range': self.data.get('dateRange', {}),
                 'analysis_timestamp': datetime.now().isoformat(),
-                'model': 'llama-3.3-70b-versatile'
+                'optimization': 'v3.1 - Multi-strategy sampling with hotspots'
             }
         }
         
-        # Statistical baseline
-        print("📊 Statistical Baseline...")
-        report['basic_stats'] = self.extract_basic_stats()
-        report['emoji_usage'] = self.detect_emoji_usage()
+        # Quick stats (no API call)
+        print("📊 Quick Stats...")
+        report['stats'] = self.extract_quick_stats()
         
-        # AI analyses
-        print("🤖 AI Analysis [1/5]: Personalities & D&D Alignments...")
-        personality_data = self.ai_enhanced_personality_analysis(600)
-        report['personalities'] = personality_data.get('personalities', [])
-        report['roles'] = personality_data.get('roles', {})
-        report['alignments'] = personality_data.get('alignments', [])
-        report['communication_patterns'] = personality_data.get('communication_patterns', {})
+        # API Call 1: Core Analysis (400 messages now)
+        print("🤖 API Call [1/2]: Core Analysis (400 samples)...")
+        core = self.ai_core_analysis(400)
+        report['personalities'] = core.get('personalities', [])
+        report['roles'] = core.get('roles', {})
+        report['alignments'] = core.get('alignments', [])
+        report['closest_pairs'] = core.get('pairs', [])
         time.sleep(0.5)
         
-        print("🤖 AI Analysis [2/5]: Golden Moments...")
-        moments_data = self.ai_golden_moments_analysis(700)
-        report['golden_moments'] = moments_data.get('golden_moments', [])
-        time.sleep(0.5)
+        # API Call 2: Content Analysis with Memes (500 messages now)
+        print("🤖 API Call [2/2]: Content & Meme Analysis (500 samples)...")
+        content = self.ai_content_analysis(500)
+        report['topics'] = content.get('topics', [])
         
-        print("🤖 AI Analysis [3/5]: Content & Humor...")
-        content_data = self.ai_content_analysis(700)
-        report['topics'] = content_data.get('topics', [])
-        report['humor'] = content_data.get('humor', {})
-        report['language_patterns'] = content_data.get('language_patterns', {})
-        time.sleep(0.5)
+        # Enhance golden moments with context
+        golden_moments = content.get('golden_moments', [])
+        if golden_moments:
+            print(f"📝 Adding context to {len(golden_moments)} golden moments...")
+            report['golden_moments'] = self.enhance_moments_with_context(golden_moments)
+        else:
+            report['golden_moments'] = []
         
-        print("🤖 AI Analysis [4/5]: Relationships...")
-        relationship_data = self.ai_relationship_dynamics(600)
-        report['closest_pairs'] = relationship_data.get('closest_pairs', [])
-        report['group_roles'] = relationship_data.get('group_roles', {})
-        report['group_dynamics'] = relationship_data.get('dynamics', {})
-        time.sleep(0.5)
+        report['memes'] = content.get('memes', {})
+        report['humor'] = content.get('humor', {})
+        report['sentiment'] = content.get('sentiment', {})
         
-        print("🤖 AI Analysis [5/5]: Sentiment Timeline...")
-        sentiment_data = self.ai_sentiment_timeline(500)
-        report['sentiment_timeline'] = sentiment_data.get('timeline', [])
-        report['sentiment_trend'] = sentiment_data.get('overall_trend', 'unknown')
+        elapsed = time.time() - start
+        report['metadata']['analysis_time'] = round(elapsed, 2)
         
-        elapsed = time.time() - start_time
-        report['metadata']['analysis_time_seconds'] = round(elapsed, 2)
-        
-        print(f"\n✅ Analysis complete in {elapsed:.1f}s\n")
+        print(f"\n✅ Complete in {elapsed:.1f}s")
+        print(f"   Topics: {len(report.get('topics', []))}")
+        print(f"   Golden Moments: {len(report.get('golden_moments', []))}")
+        print(f"   Meme Categories: {len(report.get('memes', {}).keys())}\n")
         
         return report
 
 
 # ===== FLASK API =====
 
-@app.route('/health', methods=['GET'])
+@app.route('/health', methods=['GET', 'OPTIONS'])
 def health_check():
-    """Health check endpoint"""
+    if request.method == 'OPTIONS':
+        return '', 204
     return jsonify({
         'status': 'healthy',
-        'service': 'WhatsApp Chat Analyzer',
-        'version': '2.0',
-        'api_key_configured': bool(DEFAULT_GROQ_API_KEY)
+        'service': 'Enhanced WhatsApp Analyzer',
+        'version': '3.1-improved-sampling',
+        'features': ['multi_strategy_sampling', 'hotspot_detection', 'context_chat', 'extended_memes']
     })
 
 
-@app.route('/analyze', methods=['POST'])
+@app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze_chat():
-    """
-    Main analysis endpoint
+    """Main analysis endpoint (enhanced)"""
+    if request.method == 'OPTIONS':
+        return '', 204
     
-    Expected JSON payload:
-    {
-        "chat_data": { ... },  // Required: WhatsApp chat JSON
-        "api_key": "..."       // Optional: Groq API key (uses env var if not provided)
-    }
-    """
-    try:
-        # Parse request
-        if not request.is_json:
-            return jsonify({
-                'error': 'Content-Type must be application/json'
-            }), 400
-        
-        data = request.get_json()
-        
-        # Validate chat_data
-        if 'chat_data' not in data:
-            return jsonify({
-                'error': 'Missing required field: chat_data'
-            }), 400
-        
-        chat_data = data['chat_data']
-        
-        # Validate structure
-        required_fields = ['messages', 'participants']
-        for field in required_fields:
-            if field not in chat_data:
-                return jsonify({
-                    'error': f'chat_data missing required field: {field}'
-                }), 400
-        
-        # Get API key (priority: request > env var)
-        api_key = data.get('api_key', DEFAULT_GROQ_API_KEY)
-        
-        if not api_key:
-            return jsonify({
-                'error': 'No API key provided. Set GROQ_API_KEY environment variable or include api_key in request'
-            }), 400
-        
-        # Run analysis
-        print(f"\n{'='*70}")
-        print(f"NEW ANALYSIS REQUEST")
-        print(f"Messages: {len(chat_data['messages'])}")
-        print(f"Participants: {len(chat_data['participants'])}")
-        print(f"Using {'custom' if 'api_key' in data else 'environment'} API key")
-        print(f"{'='*70}")
-        
-        analyzer = EnhancedWhatsAppAnalyzer(chat_data, api_key)
-        report = analyzer.generate_comprehensive_report()
-        
-        return jsonify({
-            'success': True,
-            'report': report
-        })
-    
-    except json.JSONDecodeError as e:
-        return jsonify({
-            'error': 'Invalid JSON format',
-            'details': str(e)
-        }), 400
-    
-    except Exception as e:
-        print(f"Error during analysis: {str(e)}")
-        return jsonify({
-            'error': 'Analysis failed',
-            'details': str(e)
-        }), 500
-
-
-@app.route('/analyze/quick', methods=['POST'])
-def quick_analyze():
-    """
-    Quick analysis endpoint (fewer API calls, faster)
-    
-    Same payload as /analyze but runs with reduced sample sizes
-    """
     try:
         if not request.is_json:
             return jsonify({'error': 'Content-Type must be application/json'}), 400
@@ -713,73 +644,92 @@ def quick_analyze():
         data = request.get_json()
         
         if 'chat_data' not in data:
-            return jsonify({'error': 'Missing required field: chat_data'}), 400
+            return jsonify({'error': 'Missing chat_data'}), 400
+        
+        chat_data = data['chat_data']
+        
+        required = ['messages', 'participants']
+        for field in required:
+            if field not in chat_data:
+                return jsonify({'error': f'Missing field: {field}'}), 400
+        
+        api_key = data.get('api_key', DEFAULT_GROQ_API_KEY)
+        if not api_key:
+            return jsonify({'error': 'No API key provided'}), 400
+        
+        print(f"\n{'='*60}")
+        print(f"ANALYSIS REQUEST")
+        print(f"Messages: {len(chat_data['messages'])}")
+        print(f"Participants: {len(chat_data['participants'])}")
+        print(f"Mode: Enhanced v3.1 (multi-strategy sampling)")
+        print(f"{'='*60}")
+        
+        analyzer = OptimizedWhatsAppAnalyzer(chat_data, api_key)
+        report = analyzer.generate_report()
+        
+        return jsonify({'success': True, 'report': report})
+    
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Analysis failed', 'details': str(e)}), 500
+
+
+@app.route('/analyze/ultra-quick', methods=['POST', 'OPTIONS'])
+def ultra_quick():
+    """Ultra-fast analysis (1 API call, 250 messages with improved sampling)"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    try:
+        if not request.is_json:
+            return jsonify({'error': 'Content-Type must be application/json'}), 400
+        
+        data = request.get_json()
+        if 'chat_data' not in data:
+            return jsonify({'error': 'Missing chat_data'}), 400
         
         chat_data = data['chat_data']
         api_key = data.get('api_key', DEFAULT_GROQ_API_KEY)
         
         if not api_key:
-            return jsonify({
-                'error': 'No API key provided. Set GROQ_API_KEY environment variable or include api_key in request'
-            }), 400
+            return jsonify({'error': 'No API key'}), 400
         
-        # Quick analysis with smaller samples
-        analyzer = EnhancedWhatsAppAnalyzer(chat_data, api_key)
+        analyzer = OptimizedWhatsAppAnalyzer(chat_data, api_key)
         
         report = {
             'metadata': {
-                'total_messages': len(analyzer.messages),
+                'total_messages': len(analyzer.processed_messages),
                 'participants': analyzer.participants,
-                'analysis_type': 'quick'
+                'analysis_type': 'ultra-quick-v3.1'
             }
         }
         
-        # Only run 2 core analyses
-        report['basic_stats'] = analyzer.extract_basic_stats()
-        personality_data = analyzer.ai_enhanced_personality_analysis(400)
-        report['personalities'] = personality_data.get('personalities', [])
-        report['roles'] = personality_data.get('roles', {})
-        report['alignments'] = personality_data.get('alignments', [])
+        report['stats'] = analyzer.extract_quick_stats()
+        core = analyzer.ai_core_analysis(250)
+        report['personalities'] = core.get('personalities', [])
+        report['roles'] = core.get('roles', {})
+        report['alignments'] = core.get('alignments', [])
         
-        moments_data = analyzer.ai_golden_moments_analysis(400)
-        report['golden_moments'] = moments_data.get('golden_moments', [])
-        
-        return jsonify({
-            'success': True,
-            'report': report
-        })
+        return jsonify({'success': True, 'report': report})
     
     except Exception as e:
-        return jsonify({
-            'error': 'Quick analysis failed',
-            'details': str(e)
-        }), 500
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Ultra-quick failed', 'details': str(e)}), 500
 
 
 if __name__ == '__main__':
-    print("\n" + "="*70)
-    print("🚀 Enhanced WhatsApp Analyzer API Starting...")
-    print("="*70)
-    print("\nEnvironment Configuration:")
-    print(f"  GROQ_API_KEY: {'✓ Set' if DEFAULT_GROQ_API_KEY else '✗ Not set (must be provided in requests)'}")
-    print("\nEndpoints:")
-    print("  GET  /health          - Health check")
-    print("  POST /analyze         - Full comprehensive analysis")
-    print("  POST /analyze/quick   - Quick analysis (2-3 API calls)")
-    print("\nPayload format:")
-    print("""
-  {
-    "chat_data": {
-      "messages": [...],
-      "participants": [...],
-      "dateRange": {...}
-    },
-    "api_key": "optional-groq-key"  // Optional if GROQ_API_KEY env var is set
-  }
-    """)
-    print("="*70 + "\n")
+    print("\n" + "="*60)
+    print("WhatsApp Analyzer v3.1 - Improved Sampling")
+    print("Features:")
+    print("  • Multi-strategy sampling (temporal + hotspots + quality)")
+    print("  • Activity hotspot detection")
+    print("  • Better conversation thread coverage")
+    print("  • Increased samples: 400 core + 500 content")
+    print("  • Ultra-compact formatting (90-95 chars/msg)")
+    print("="*60 + "\n")
     
-    # Run on all interfaces, port 5050
-if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5050))
     app.run(host='0.0.0.0', port=port, debug=False)
